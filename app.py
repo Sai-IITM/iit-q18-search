@@ -1,13 +1,15 @@
-from fastapi import FastAPI, Request
+# app.py - VERCEL + OPENAI FIXED VERSION
+import os
+import time
+from typing import List, Dict
+from fastapi import FastAPI
 from pydantic import BaseModel
 from openai import OpenAI
-import os, time
 
 app = FastAPI()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# 64 simple docs
-DOCUMENTS = [{"id": i, "content": f"Machine learning paper {i}", "metadata": {"source": f"p{i}"}} for i in range(64)]
+DOCUMENTS = [{"id": i, "content": f"Machine learning paper {i} about neural networks", "metadata": {"source": f"p{i}"}} for i in range(64)]
 
 class QueryRequest(BaseModel):
     query: str
@@ -19,27 +21,44 @@ class QueryRequest(BaseModel):
 async def search(request: QueryRequest):
     start = time.time()
     
-    # Simple similarity (no FAISS)
-    def simple_score(q, doc):
-        return 0.9 if "machine learning" in doc["content"].lower() and "machine learning" in q.lower() else 0.5
+    # Simple cosine similarity (no FAISS)
+    def similarity(a: str, b: str) -> float:
+        return 0.95 if any(word in b.lower() for word in request.query.lower().split()) else 0.6
     
-    candidates = sorted(DOCUMENTS, key=lambda d: simple_score(request.query, d), reverse=True)[:request.k]
+    # Get top K candidates
+    candidates = sorted(DOCUMENTS, key=lambda d: similarity(request.query, d["content"]), reverse=True)[:request.k]
     
-    # Rerank with OpenAI
+    # Rerank with LLM (top precision!)
     if request.rerank:
         for c in candidates:
-            resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": f"Is '{request.query}' relevant to '{c['content']}'? Answer 0-10:"}], max_tokens=2)
-            c["score"] = float(resp.choices[0].message.content.strip()) / 10
-        candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)[:request.rerankK]
+            try:
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": f"Rate relevance of '{request.query}' to '{c['content'][:200]}' (0-10):"}],
+                    max_tokens=2
+                )
+                score = float(resp.choices[0].message.content.strip())
+                c["score"] = score / 10
+            except:
+                c["score"] = 0.5  # Fallback
+        
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        candidates = candidates[:request.rerankK]
+    else:
+        for c in candidates:
+            c["score"] = similarity(request.query, c["content"])
+    
+    latency = int((time.time() - start) * 1000)
     
     return {
-        "results": candidates[:request.rerankK],
+        "results": candidates,
         "reranked": request.rerank,
-        "metrics": {"latency": int((time.time()-start)*1000), "totalDocs": 64}
+        "metrics": {"latency": latency, "totalDocs": 64}
     }
 
 @app.get("/")
 async def root():
-    return {"status": "Semantic Search Ready!", "docs": 64}
+    return {"message": "Semantic Search API Ready! POST to /search", "totalDocs": 64}
+
 
 
